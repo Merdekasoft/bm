@@ -19,19 +19,19 @@ from pathlib import Path
 from datetime import datetime
 from zeroconf import ServiceInfo, Zeroconf, ServiceBrowser
 
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QListWidget, QListWidgetItem, QTextBrowser, QLineEdit, QPushButton, QStackedWidget,
     QLabel, QFileDialog, QProgressBar, QMenu, QMessageBox, QSizePolicy, QSpacerItem,
     QScrollArea
 )
-from PyQt6.QtCore import QThread, pyqtSignal, QObject, Qt, QUrl, QTimer, QSize
-from PyQt6.QtGui import (
+from PySide6.QtCore import QThread, Signal, QObject, Qt, QUrl, QTimer, QSize
+from PySide6.QtGui import (
     QIcon, QFont, QDesktopServices, QAction, QPalette, QPixmap, QPainter, QColor,
     QPainterPath
 )
-from PyQt6.QtMultimedia import QSoundEffect
-from PyQt6.QtSvg import QSvgRenderer
+from PySide6.QtMultimedia import QSoundEffect
+from PySide6.QtSvg import QSvgRenderer
 
 # --- Application Configuration ---
 APP_COLORS = {
@@ -138,7 +138,7 @@ class ZeroconfListener:
     def update_service(self, zeroconf, type, name): self.add_service(zeroconf, type, name)
 
 class AdvancedNetworkManager(QObject):
-    user_discovered = pyqtSignal(dict); user_went_offline = pyqtSignal(str); private_message_received = pyqtSignal(dict)
+    user_discovered = Signal(dict); user_went_offline = Signal(str); private_message_received = Signal(dict)
     def __init__(self):
         super().__init__()
         self.username = getpass.getuser(); self.my_ip = self._get_local_ip(); self.port = self._get_free_port()
@@ -327,7 +327,7 @@ class MainWindow(QMainWindow):
         username = peer_data['username']
         page, widgets = self._create_chat_page(username, service_name)
         self.chat_area.addWidget(page)
-        item = QListWidgetItem(); item_widget = ChatListItem(username); item.setSizeHint(item_widget.sizeHint()); item.setData(Qt.ItemDataRole.UserRole, peer_data)
+        item = QListWidgetItem(); item_widget = ChatListItem(username); item.setSizeHint(item_widget.sizeHint()); item.setData(Qt.UserRole, peer_data)
         self.chat_list_widget.addItem(item); self.chat_list_widget.setItemWidget(item, item_widget)
         widgets["send_button"].clicked.connect(lambda _, s=service_name: self.send_private_message(s))
         widgets["input_field"].returnPressed.connect(lambda s=service_name: self.send_private_message(s))
@@ -335,7 +335,7 @@ class MainWindow(QMainWindow):
         if self.chat_list_widget.count() == 1: self.chat_list_widget.setCurrentItem(item); self.on_chat_selected(item)
 
     def on_chat_selected(self, item):
-        peer_data = item.data(Qt.ItemDataRole.UserRole)
+        peer_data = item.data(Qt.UserRole)
         if peer_data and peer_data['name'] in self.chat_widgets: self.chat_area.setCurrentWidget(self.chat_widgets[peer_data['name']]["page"])
 
     def remove_user(self, service_name):
