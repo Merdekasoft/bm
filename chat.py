@@ -228,21 +228,21 @@ class MainWindow(QMainWindow):
 
     def setup_ui(self):
         self.setWindowTitle("B Messenger"); self.setFont(QFont("Segoe UI", 10))
-        # Hapus/minimalkan batas minimum agar window bisa diperkecil
-        # self.setMinimumSize(900, 600)
-        self.resize(200, 600)
-        self.setGeometry(100, 100, 200, 600)
+        # Tampilkan list dan chat bersamaan (normal desktop layout)
+        self.setMinimumSize(900, 600)
+        self.setGeometry(100, 100, 900, 600)
         self.setStyleSheet(f"background-color: {APP_COLORS['sidebar_bg']};")
         main_widget = QWidget(); self.setCentralWidget(main_widget)
         main_layout = QHBoxLayout(main_widget); main_layout.setContentsMargins(0, 0, 0, 0); main_layout.setSpacing(0)
-        # Simpan referensi panel untuk show/hide
-        self.left_panel = QWidget(); self.left_panel.setMinimumWidth(200); self.left_panel.setMaximumWidth(400)
+        # Panel kiri: daftar chat
+        self.left_panel = QWidget(); self.left_panel.setMinimumWidth(260); self.left_panel.setMaximumWidth(400)
         self.left_panel.setStyleSheet(f"background-color: {APP_COLORS['sidebar_bg']}; border-right: 1px solid {APP_COLORS['input_border']};")
         left_layout = QVBoxLayout(self.left_panel); left_layout.setContentsMargins(0, 0, 0, 0)
         self.chat_list_widget = QListWidget()
         self.chat_list_widget.setStyleSheet(f"""QListWidget {{ border: none; }} QListWidget::item {{ border-bottom: 1px solid {APP_COLORS['input_border']}; }} QListWidget::item:selected, QListWidget::item:hover {{ background-color: {APP_COLORS['active_chat']}; }}""")
         self.chat_list_widget.itemClicked.connect(self.on_chat_selected)
         left_layout.addWidget(self.chat_list_widget)
+        # Panel kanan: area chat
         self.right_panel = QWidget(); self.right_panel.setStyleSheet(f"background-color: {APP_COLORS['chat_bg']};")
         right_layout = QVBoxLayout(self.right_panel); right_layout.setContentsMargins(0, 0, 0, 0)
         self.chat_area = QStackedWidget()
@@ -250,7 +250,9 @@ class MainWindow(QMainWindow):
         self.placeholder_widget.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.chat_area.addWidget(self.placeholder_widget)
         right_layout.addWidget(self.chat_area)
-        main_layout.addWidget(self.right_panel); main_layout.addWidget(self.left_panel)
+        # Tampilkan kedua panel bersamaan
+        main_layout.addWidget(self.left_panel)
+        main_layout.addWidget(self.right_panel)
 
     def _create_chat_page(self, username, service_name):
         page = QWidget()
@@ -258,16 +260,11 @@ class MainWindow(QMainWindow):
         header_widget = QWidget(); header_widget.setFixedHeight(60)
         header_widget.setStyleSheet(f"background-color: {APP_COLORS['header_bg']}; border-bottom: 1px solid {APP_COLORS['input_border']}; padding: 0 10px;")
         header_layout = QHBoxLayout(header_widget); header_layout.setContentsMargins(0,0,0,0)
-        # Tombol back untuk mode mobile
-        back_button = QPushButton("←"); back_button.setFixedSize(40, 40)
-        back_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        back_button.setStyleSheet("QPushButton { background: transparent; border: none; font-size: 22px; } QPushButton:hover { background: #E0E0E0; }")
-        back_button.clicked.connect(self.show_chat_list)
+        # Hapus tombol back, hanya tampilkan nama dan tombol ping
         header_label = QLabel(f"{username}"); header_label.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold)); header_label.setStyleSheet(f"color: {APP_COLORS['text_primary']};")
         ping_button = QPushButton(); ping_button.setIcon(create_icon_from_svg(ICONS['ping'], APP_COLORS['icon_color'])); ping_button.setIconSize(QSize(24, 24)); ping_button.setFixedSize(40, 40)
         ping_button.setCursor(Qt.CursorShape.PointingHandCursor); ping_button.setToolTip("Send a Ping!"); ping_button.setStyleSheet("QPushButton { background-color: transparent; border-radius: 20px; border: none; } QPushButton:hover { background-color: #E0E0E0; }")
         ping_button.clicked.connect(lambda: self.send_ping(service_name))
-        header_layout.addWidget(back_button)
         header_layout.addWidget(header_label); header_layout.addStretch(); header_layout.addWidget(ping_button)
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
@@ -511,14 +508,10 @@ class MainWindow(QMainWindow):
         peer_data = item.data(Qt.UserRole)
         if peer_data and peer_data['name'] in self.chat_widgets:
             self.chat_area.setCurrentWidget(self.chat_widgets[peer_data['name']]["page"])
-            # Sembunyikan sidebar, tampilkan chat (mode mobile)
-            self.left_panel.hide()
-            self.right_panel.show()
+            # Jangan sembunyikan sidebar, biarkan tampil bersamaan
 
     def show_chat_list(self):
-        # Tampilkan kembali daftar chat (sidebar), sembunyikan area chat
-        self.left_panel.show()
-        self.right_panel.show()
+        # Tidak perlu sembunyikan/tampilkan panel, biarkan layout tetap
         self.chat_area.setCurrentWidget(self.placeholder_widget)
 
     def remove_user(self, service_name):
@@ -654,8 +647,16 @@ class MainWindow(QMainWindow):
     def handle_incoming_ping(self, msg):
         from_user = msg.get("from_user"); print(f"PING!!! received from {from_user}")
         self.shake_window()
-        if os.path.exists("ping.wav"):
-            self.ping_sound = QSoundEffect(); self.ping_sound.setSource(QUrl.fromLocalFile("ping.wav")); self.ping_sound.play()
+        # Mainkan ping.mp3 jika ada, jika tidak fallback ke ping.wav
+        ping_sound_path = None
+        if os.path.exists("ping.mp3"):
+            ping_sound_path = "ping.mp3"
+        elif os.path.exists("ping.wav"):
+            ping_sound_path = "ping.wav"
+        if ping_sound_path:
+            self.ping_sound = QSoundEffect()
+            self.ping_sound.setSource(QUrl.fromLocalFile(ping_sound_path))
+            self.ping_sound.play()
         for service_name, data in self.chat_widgets.items():
             if data['peer_data']['username'] == from_user:
                 widgets = data['widgets']
