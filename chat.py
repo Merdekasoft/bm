@@ -208,24 +208,32 @@ class AdvancedNetworkManager(QObject):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        # Tambahkan icon aplikasi bm.png
-        icon_path = os.path.join(os.path.dirname(__file__), "bm.png")
-        if os.path.exists(icon_path):
-            self.setWindowIcon(QIcon(icon_path))
-            tray_icon = QIcon(icon_path)
-        else:
-            tray_icon = self.windowIcon()
+        # Optimasi: Cache tray icon
         # Fitur tray icon
-        self.tray = QSystemTrayIcon(tray_icon, self)
-        self.tray.setToolTip("B Messenger")
-        tray_menu = QTrayMenu()
-        show_action = tray_menu.addAction("Show")
-        quit_action = tray_menu.addAction("Quit")
-        show_action.triggered.connect(self.showNormal)
-        quit_action.triggered.connect(QApplication.instance().quit)
-        self.tray.setContextMenu(tray_menu)
-        self.tray.activated.connect(self._on_tray_activated)
-        self.tray.show()
+        self.tray_icon = QSystemTrayIcon(self)
+        icon_path = os.path.join(os.path.dirname(__file__), "bm.png")
+        self.tray_icon.setIcon(QIcon(icon_path) if os.path.exists(icon_path) else QIcon.fromTheme("system-run"))
+        self.tray_icon.setToolTip("Show/hide the application. Right click for menu.")
+
+        tray_menu = QMenu()
+        show_action = QAction("Show", self)
+        show_action.triggered.connect(self.show)
+        tray_menu.addAction(show_action)
+
+        hide_action = QAction("Hide", self)
+        hide_action.triggered.connect(self.hide)
+        tray_menu.addAction(hide_action)
+
+        exit_action = QAction("Exit", self)
+        exit_action.triggered.connect(self.close_app)
+        tray_menu.addAction(exit_action)
+
+        self.tray_icon.setContextMenu(tray_menu)
+        self.tray_icon.show()
+        self.tray_icon.activated.connect(self.tray_icon_clicked)
+
+        # Flag untuk menghindari multiple activation
+        self.is_activating = False
         self.chat_widgets = {}
         self.active_transfers = {} # Untuk melacak transfer file yang sedang berjalan
         self.setup_ui()
@@ -233,9 +241,14 @@ class MainWindow(QMainWindow):
         self.shake_timer = QTimer(self); self.shake_timer.timeout.connect(self._shake_step); self.shake_counter = 0
         self.ping_sound_path = os.path.join(os.path.dirname(__file__), "ping.wav")
 
+        # Remove close button from window (Wayland workaround)
+        flags = self.windowFlags()
+        flags &= ~Qt.WindowCloseButtonHint
+        flags &= ~Qt.WindowSystemMenuHint
+        self.setWindowFlags(flags)
+
     def setup_ui(self):
         self.setWindowTitle("B Messenger"); self.setFont(QFont("Segoe UI", 10))
-        # Tampilkan list dan chat bersamaan (normal desktop layout)
         self.setMinimumSize(900, 600)
         self.setGeometry(100, 100, 900, 600)
         self.setStyleSheet(f"background-color: {APP_COLORS['sidebar_bg']};")
@@ -243,10 +256,50 @@ class MainWindow(QMainWindow):
         main_layout = QHBoxLayout(main_widget); main_layout.setContentsMargins(0, 0, 0, 0); main_layout.setSpacing(0)
         # Panel kiri: daftar chat
         self.left_panel = QWidget(); self.left_panel.setMinimumWidth(260); self.left_panel.setMaximumWidth(400)
-        self.left_panel.setStyleSheet(f"background-color: {APP_COLORS['sidebar_bg']}; border-right: 1px solid {APP_COLORS['input_border']};")
+        self.left_panel.setStyleSheet(f"""
+            background-color: {APP_COLORS['sidebar_bg']};
+            border-right: 1px solid {APP_COLORS['input_border']};
+        """)
         left_layout = QVBoxLayout(self.left_panel); left_layout.setContentsMargins(0, 0, 0, 0)
         self.chat_list_widget = QListWidget()
-        self.chat_list_widget.setStyleSheet(f"""QListWidget {{ border: none; }} QListWidget::item {{ border-bottom: 1px solid {APP_COLORS['input_border']}; }} QListWidget::item:selected, QListWidget::item:hover {{ background-color: {APP_COLORS['active_chat']}; }}""")
+        # Percantik list pengguna dan scrollbar
+        self.chat_list_widget.setStyleSheet(f"""
+            QListWidget {{
+                border: none;
+                background: {APP_COLORS['sidebar_bg']};
+                font-size: 15px;
+            }}
+            QListWidget::item {{
+                border-bottom: 1px solid {APP_COLORS['input_border']};
+                padding: 8px 0;
+                margin: 0;
+            }}
+            QListWidget::item:selected, QListWidget::item:hover {{
+                background-color: {APP_COLORS['active_chat']};
+                border-radius: 8px;
+            }}
+            QScrollBar:vertical {{
+                width: 7px;
+                background: {APP_COLORS['sidebar_bg']};
+                margin: 0px;
+                border-radius: 4px;
+            }}
+            QScrollBar::handle:vertical {{
+                background: #d1d7db;
+                min-height: 24px;
+                border-radius: 4px;
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                height: 0px;
+                background: none;
+                border: none;
+            }}
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+                background: none;
+            }}
+        """)
+        self.chat_list_widget.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        self.chat_list_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.chat_list_widget.itemClicked.connect(self.on_chat_selected)
         left_layout.addWidget(self.chat_list_widget)
         # Panel kanan: area chat
@@ -340,24 +393,47 @@ class MainWindow(QMainWindow):
             "QPushButton:hover {background-color: #E9EDEF;}"
         )
         input_field = QLineEdit(placeholderText="Type a message...")
-        # Set font family ke Segoe UI agar angka dan huruf konsisten, emoji tetap muncul jika tersedia
-        normal_font = QFont("Segoe UI", 11)
-        input_field.setFont(normal_font)
+        # Set font emoji-aware agar emoticon berwarna di edit text
+        emoji_font = QFont()
+        for fname in ["Segoe UI Emoji", "Noto Color Emoji", "Apple Color Emoji"]:
+            emoji_font.setFamily(fname)
+            if QFont(fname).exactMatch():
+                break
+        else:
+            emoji_font.setFamily("Segoe UI")
+        emoji_font.setPointSize(12)
+        input_field.setFont(emoji_font)
+        # Percantik tampilan input_field
         input_field.setStyleSheet(
-            f"""QLineEdit {{
-            background-color: {APP_COLORS['incoming_bg']};
-            border: none;
-            border-radius: 24px;
-            padding-left: 18px;
-            padding-right: 18px;
-            padding-top: 16px;
-            padding-bottom: 16px;
-            color: {APP_COLORS['text_primary']};
-            box-shadow: 0 1px 2px rgba(0,0,0,0.04);
-            }}"""
+            f"""
+            QLineEdit {{
+                background-color: {APP_COLORS['incoming_bg']};
+                border: 1.5px solid {APP_COLORS['input_border']};
+                border-radius: 24px;
+                padding-left: 20px;
+                padding-right: 20px;
+                padding-top: 14px;
+                padding-bottom: 14px;
+                color: {APP_COLORS['text_primary']};
+                font-size: 15px;
+                box-shadow: 0 2px 8px rgba(0,0,0,0.07);
+                transition: border-color 0.2s;
+            }}
+            QLineEdit:focus {{
+                border: 1.5px solid {APP_COLORS['primary_green']};
+                background-color: #fff;
+                outline: none;
+            }}
+            QLineEdit:hover {{
+                border: 1.5px solid {APP_COLORS['secondary_green']};
+            }}
+            """
         )
         send_button = QPushButton(); send_button.setIcon(create_icon_from_svg(ICONS['send'], APP_COLORS['icon_color'])); send_button.setIconSize(QSize(28, 28)); send_button.setFixedSize(40, 40)
-        send_button.setCursor(Qt.CursorShape.PointingHandCursor); send_button.setToolTip("Send Message"); send_button.setStyleSheet("QPushButton {background-color: transparent; border-radius: 20px; border: none;} QPushButton:hover {background-color: #E9EDEF;}")
+        send_button.setCursor(Qt.CursorShape.PointingHandCursor); send_button.setToolTip("Send Message"); send_button.setStyleSheet(
+            "QPushButton {background-color: #e8f5e9; border-radius: 20px; border: none;}"
+            "QPushButton:hover {background-color: #c8e6c9;}"
+        )
 
         # Fungsi popup emoji dengan tab kategori
         def show_emoji_popup():
@@ -632,13 +708,17 @@ class MainWindow(QMainWindow):
         msg_dict = {"type": "ping", "timestamp": timestamp, "from_user": self.network_manager.username}
         self.network_manager.send_tcp_message(data['peer_data'], msg_dict)
         self.add_message_to_history(data['widgets']['scroll_area'], data['widgets']['scroll_layout'], msg_dict, True)
-        self.play_ping_sound()
+        # self.play_ping_sound()  # Hapus di sini, hanya penerima yang mainkan suara
 
     def handle_incoming_ping(self, msg):
         from_user = msg.get("from_user")
         print(f"PING!!! received from {from_user}")
         self.shake_window()
-        self.play_ping_sound()
+        self.play_ping_sound()  # Suara hanya dimainkan di penerima
+        self.raise_()
+        self.activateWindow()
+        self.setWindowState(self.windowState() | Qt.WindowActive)
+        self.tray.showMessage("B Messenger", f"PING!!! from {from_user}", QSystemTrayIcon.Information, 2500)
         for service_name, data in self.chat_widgets.items():
             if data['peer_data']['username'] == from_user:
                 widgets = data['widgets']
@@ -664,21 +744,23 @@ class MainWindow(QMainWindow):
         offset_x = (random.randint(0, 1) * 2 - 1) * 5; offset_y = (random.randint(0, 1) * 2 - 1) * 5
         self.move(self.original_pos.x() + offset_x, self.original_pos.y() + offset_y); self.shake_counter += 1
 
-    def _on_tray_activated(self, reason):
+    def tray_icon_clicked(self, reason):
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
-            self.showNormal()
-            self.raise_()
-            self.activateWindow()
-            # Tambahkan fokus dan pastikan window di depan
-            self.setWindowState(self.windowState() & ~Qt.WindowMinimized | Qt.WindowActive)
-            self.show()
-            QApplication.processEvents()
+            if self.isVisible():
+                self.hide()
+            else:
+                self.show()
+                self.activateWindow()
+
+    def close_app(self):
+        self.tray_icon.hide()
+        self.close()
 
     def closeEvent(self, event):
-        # Sembunyikan window, tetap jalan di tray
         event.ignore()
         self.hide()
-        self.tray.showMessage("B Messenger", "The application is still running in the tray.", QSystemTrayIcon.Information, 2000)
+        # Hapus notifikasi tray saat benar-benar keluar aplikasi
+        # self.tray.showMessage("B Messenger", "The application is still running in the tray.", QSystemTrayIcon.Information, 2000)
         for transfer_id, transfer_data in list(self.active_transfers.items()):
             try:
                 transfer_data['file_handle'].close()
@@ -705,16 +787,10 @@ def ensure_certificates():
     return True
 
 if __name__ == "__main__":
-    if not ensure_certificates():
-        app_temp = QApplication(sys.argv)
-        error_box = QMessageBox(); error_box.setIcon(QMessageBox.Icon.Critical); error_box.setText(f"Could not create certificate files: '{CERTFILE}' & '{KEYFILE}'"); error_box.setInformativeText("Check OpenSSL installation and permissions."); error_box.setWindowTitle("Configuration Error"); error_box.exec()
-        sys.exit(1)
     app = QApplication(sys.argv)
-    # Set theme KDE jika tersedia di sistem
-    if QStyleFactory:
-        if "breeze" in QStyleFactory.keys():
-            app.setStyle(QStyleFactory.create("breeze"))
-        elif "oxygen" in QStyleFactory.keys():
-            app.setStyle(QStyleFactory.create("oxygen"))
-        # Jika tidak ada, biarkan default
-    main_win = MainWindow(); main_win.show(); sys.exit(app.exec())
+    if not QSystemTrayIcon.isSystemTrayAvailable():
+        print("System tray is not available!")
+        sys.exit(1)
+    main_win = MainWindow()
+    main_win.show()
+    sys.exit(app.exec())
