@@ -125,9 +125,15 @@ class ZeroconfListener:
             my_hostname = socket.gethostname()
             # FIX: add missing closing bracket for the list (syntax error)
             if info and info.server not in [f"{my_hostname}.local.", f"{my_hostname}."]:
-                peer_data = {"name": name, "username": info.properties.get(b'username', b'unknown').decode('utf-8'), "address": socket.inet_ntoa(info.addresses[0]), "port": info.port}
+                peer_data = {
+                    "name": name,
+                    "username": info.properties.get(b'username', b'unknown').decode('utf-8'),
+                    "address": socket.inet_ntoa(info.addresses[0]),
+                    "port": info.port
+                }
                 self.network_manager.user_discovered.emit(peer_data)
-        except Exception as e: print(f"Error processing service {name}: {e}")
+        except Exception as e:
+            print(f"Error processing service {name}: {e}")
     def update_service(self, zeroconf, type, name): self.add_service(zeroconf, type, name)
 
 class AdvancedNetworkManager(QObject):
