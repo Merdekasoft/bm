@@ -363,7 +363,7 @@ class MainWindow(QMainWindow):
             }
             dialog = QDialog(self)
             dialog.setWindowFlags(Qt.Popup)
-            dialog.setMinimumWidth(37 * 10 + 32)  # Lebar minimum agar tab tidak terlalu sempit
+            dialog.setMinimumWidth(37 * 10 + 32)
             layout = QVBoxLayout(dialog)
             tabs = QTabWidget(dialog)
             for cat, emojis in emoji_categories.items():
@@ -391,7 +391,12 @@ class MainWindow(QMainWindow):
                 tabs.addTab(tab, cat)
             layout.addWidget(tabs)
             dialog.setLayout(layout)
-            dialog.move(emoji_button.mapToGlobal(emoji_button.rect().bottomLeft()))
+            # --- Ubah posisi popup ke atas input_field ---
+            input_rect = input_field.rect()
+            input_global = input_field.mapToGlobal(input_rect.bottomLeft())
+            dialog_height = dialog.sizeHint().height()
+            # Geser ke atas setinggi dialog
+            dialog.move(input_global.x(), input_global.y() - dialog_height)
             dialog.exec()
         emoji_button.clicked.connect(show_emoji_popup)
 
@@ -538,17 +543,28 @@ class MainWindow(QMainWindow):
 
     def _send_file_in_thread(self, file_path, transfer_id, peer_data):
         try:
+            time.sleep(0.5)  # Delay lebih panjang
             with open(file_path, 'rb') as f:
                 while True:
                     chunk = f.read(CHUNK_SIZE)
                     if not chunk:
                         break
                     b64_chunk = base64.b64encode(chunk).decode('ascii')
-                    chunk_msg = { "type": "file_chunk", "transfer_id": transfer_id, "data": b64_chunk }
+                    chunk_msg = {
+                        "type": "file_chunk", 
+                        "transfer_id": transfer_id, 
+                        "data": b64_chunk,
+                        "seq_num": f.tell()  # Tambah nomor urut
+                    }
                     self.network_manager.send_tcp_message(peer_data, chunk_msg)
-            end_msg = { "type": "file_end", "transfer_id": transfer_id, "from_user": self.network_manager.username }
+                    time.sleep(0.05)  # Tambah delay kecil antar chunk
+            end_msg = {
+                "type": "file_end", 
+                "transfer_id": transfer_id, 
+                "from_user": self.network_manager.username,
+                "file_size": os.path.getsize(file_path)  # Kirim ukuran file untuk verifikasi
+            }
             self.network_manager.send_tcp_message(peer_data, end_msg)
-            print(f"File transfer {transfer_id} completed.")
         except Exception as e:
             print(f"Error during file sending thread: {e}")
 
@@ -565,28 +581,25 @@ class MainWindow(QMainWindow):
             filesize = os.path.getsize(file_path)
             transfer_id = str(uuid.uuid4())
             header_msg = {
-                "type": "file_header", "filename": filename, "filesize": filesize,
-                "transfer_id": transfer_id, "timestamp": time.time(),
-                "from_user": self.network_manager.username
+                "type": "file_header", 
+                "filename": filename, 
+                "filesize": filesize,
+                "transfer_id": transfer_id, 
+                "timestamp": time.time(),
+                "from_user": self.network_manager.username,
+                "expected_size": filesize  # Tambah ini
             }
             self.network_manager.send_tcp_message(data['peer_data'], header_msg)
             widgets = data['widgets']
             self.add_message_to_history(widgets['scroll_area'], widgets['scroll_layout'], header_msg, True)
+            # Tambahkan delay agar penerima siap
+            time.sleep(0.1)
             thread = threading.Thread(target=self._send_file_in_thread, args=(file_path, transfer_id, data['peer_data']))
             thread.daemon = True
             thread.start()
         except Exception as e:
             print(f"Error preparing file send: {e}")
             QMessageBox.critical(self, "File Error", f"Tidak dapat membaca atau mengirim file:\n{e}")
-
-    def send_ping(self, target_service_name):
-        data = self.chat_widgets.get(target_service_name)
-        if not data: return
-        widgets = data['widgets']
-        print(f"Sending PING! to {data['peer_data']['username']}")
-        msg_dict = {"type": "ping", "timestamp": time.time(), "from_user": self.network_manager.username}
-        self.network_manager.send_tcp_message(data['peer_data'], msg_dict)
-        self.add_message_to_history(widgets['scroll_area'], widgets['scroll_layout'], msg_dict, True)
 
     def handle_incoming_message(self, msg):
         msg_type = msg.get("type")
@@ -612,7 +625,10 @@ class MainWindow(QMainWindow):
                     counter += 1
                 file_handle = open(save_path, 'wb')
                 self.active_transfers[transfer_id] = {
-                    'file_handle': file_handle, 'path': save_path, 'bubble': None
+                    'file_handle': file_handle,
+                    'path': save_path,
+                    'bubble': None,
+                    'expected_size': msg.get('filesize', 0)  # Simpan ukuran file
                 }
                 print(f"Receiving file {msg['filename']} ({transfer_id}), saving to {save_path}")
                 if target_widget_info:
@@ -626,6 +642,11 @@ class MainWindow(QMainWindow):
                 try:
                     chunk_data = base64.b64decode(msg['data'])
                     transfer['file_handle'].write(chunk_data)
+                    transfer['file_handle'].flush()
+                    if transfer['bubble'] and transfer.get('expected_size', 0) > 0:
+                        current_size = transfer['file_handle'].tell()
+                        percent = (current_size / transfer['expected_size']) * 100
+                        transfer['bubble'].set_status(f"Menerima... {percent:.1f}%")
                 except Exception as e:
                     print(f"Error writing chunk for {transfer_id}: {e}")
         elif msg_type == 'file_end':
@@ -654,9 +675,21 @@ class MainWindow(QMainWindow):
         elif os.path.exists("ping.wav"):
             ping_sound_path = "ping.wav"
         if ping_sound_path:
-            self.ping_sound = QSoundEffect()
-            self.ping_sound.setSource(QUrl.fromLocalFile(ping_sound_path))
-            self.ping_sound.play()
+            # QSoundEffect hanya mendukung WAV, bukan MP3.
+            # Untuk MP3, gunakan QMediaPlayer.
+            if ping_sound_path.endswith(".mp3"):
+                from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
+                self.ping_player = QMediaPlayer()
+                self.ping_audio = QAudioOutput()
+                self.ping_player.setAudioOutput(self.ping_audio)
+                self.ping_player.setSource(QUrl.fromLocalFile(ping_sound_path))
+                self.ping_audio.setVolume(1.0)
+                self.ping_player.play()
+            else:
+                self.ping_sound = QSoundEffect()
+                self.ping_sound.setSource(QUrl.fromLocalFile(ping_sound_path))
+                self.ping_sound.setVolume(1.0)
+                self.ping_sound.play()
         for service_name, data in self.chat_widgets.items():
             if data['peer_data']['username'] == from_user:
                 widgets = data['widgets']
