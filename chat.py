@@ -208,44 +208,30 @@ class AdvancedNetworkManager(QObject):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        # Optimasi: Cache tray icon
-        # Fitur tray icon
-        self.tray_icon = QSystemTrayIcon(self)
+        # Tambahkan icon aplikasi bm.png
         icon_path = os.path.join(os.path.dirname(__file__), "bm.png")
-        self.tray_icon.setIcon(QIcon(icon_path) if os.path.exists(icon_path) else QIcon.fromTheme("system-run"))
-        self.tray_icon.setToolTip("Show/hide the application. Right click for menu.")
-
-        tray_menu = QMenu()
-        show_action = QAction("Show", self)
-        show_action.triggered.connect(self.show)
-        tray_menu.addAction(show_action)
-
-        hide_action = QAction("Hide", self)
-        hide_action.triggered.connect(self.hide)
-        tray_menu.addAction(hide_action)
-
-        exit_action = QAction("Exit", self)
-        exit_action.triggered.connect(self.close_app)
-        tray_menu.addAction(exit_action)
-
-        self.tray_icon.setContextMenu(tray_menu)
-        self.tray_icon.show()
-        self.tray_icon.activated.connect(self.tray_icon_clicked)
-
-        # Flag untuk menghindari multiple activation
-        self.is_activating = False
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
+            tray_icon = QIcon(icon_path)
+        else:
+            tray_icon = self.windowIcon()
+        # Fitur tray icon
+        self.tray = QSystemTrayIcon(tray_icon, self)
+        self.tray.setToolTip("B Messenger")
+        tray_menu = QTrayMenu()
+        show_action = tray_menu.addAction("Show")
+        quit_action = tray_menu.addAction("Quit")
+        show_action.triggered.connect(self.showNormal)
+        quit_action.triggered.connect(QApplication.instance().quit)
+        self.tray.setContextMenu(tray_menu)
+        self.tray.activated.connect(self._on_tray_activated)
+        self.tray.show()
         self.chat_widgets = {}
         self.active_transfers = {} # Untuk melacak transfer file yang sedang berjalan
         self.setup_ui()
         self.setup_network()
         self.shake_timer = QTimer(self); self.shake_timer.timeout.connect(self._shake_step); self.shake_counter = 0
         self.ping_sound_path = os.path.join(os.path.dirname(__file__), "ping.wav")
-
-        # Remove close button from window (Wayland workaround)
-        flags = self.windowFlags()
-        flags &= ~Qt.WindowCloseButtonHint
-        flags &= ~Qt.WindowSystemMenuHint
-        self.setWindowFlags(flags)
 
     def setup_ui(self):
         self.setWindowTitle("B Messenger"); self.setFont(QFont("Segoe UI", 10))
@@ -744,19 +730,22 @@ class MainWindow(QMainWindow):
         offset_x = (random.randint(0, 1) * 2 - 1) * 5; offset_y = (random.randint(0, 1) * 2 - 1) * 5
         self.move(self.original_pos.x() + offset_x, self.original_pos.y() + offset_y); self.shake_counter += 1
 
-    def tray_icon_clicked(self, reason):
+    def _on_tray_activated(self, reason):
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
-            if self.isVisible():
-                self.hide()
-            else:
-                self.show()
-                self.activateWindow()
-
-    def close_app(self):
-        self.tray_icon.hide()
-        self.close()
+            # Pastikan window benar-benar muncul di depan dan aktif secara konsisten
+            self.showNormal()
+            self.raise_()
+            self.activateWindow()
+            self.setWindowState(self.windowState() & ~Qt.WindowMinimized | Qt.WindowActive)
+            self.show()
+            QApplication.processEvents()
+            # Tambahan: paksa fokus dan aktifkan window jika OS lambat
+            self.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
+            QTimer.singleShot(0, self.raise_)
+            QTimer.singleShot(0, self.activateWindow)
 
     def closeEvent(self, event):
+        # Sembunyikan window, tetap jalan di tray
         event.ignore()
         self.hide()
         # Hapus notifikasi tray saat benar-benar keluar aplikasi
@@ -787,10 +776,16 @@ def ensure_certificates():
     return True
 
 if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    if not QSystemTrayIcon.isSystemTrayAvailable():
-        print("System tray is not available!")
+    if not ensure_certificates():
+        app_temp = QApplication(sys.argv)
+        error_box = QMessageBox(); error_box.setIcon(QMessageBox.Icon.Critical); error_box.setText(f"Could not create certificate files: '{CERTFILE}' & '{KEYFILE}'"); error_box.setInformativeText("Check OpenSSL installation and permissions."); error_box.setWindowTitle("Configuration Error"); error_box.exec()
         sys.exit(1)
-    main_win = MainWindow()
-    main_win.show()
-    sys.exit(app.exec())
+    app = QApplication(sys.argv)
+    # Set theme KDE jika tersedia di sistem
+    if QStyleFactory:
+        if "breeze" in QStyleFactory.keys():
+            app.setStyle(QStyleFactory.create("breeze"))
+        elif "oxygen" in QStyleFactory.keys():
+            app.setStyle(QStyleFactory.create("oxygen"))
+        # Jika tidak ada, biarkan default
+    main_win = MainWindow(); main_win.show(); sys.exit(app.exec())
