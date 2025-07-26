@@ -208,24 +208,26 @@ class AdvancedNetworkManager(QObject):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        # Tambahkan icon aplikasi bm.png
+        # Tray icon setup (modifikasi agar sesuai permintaan)
         icon_path = os.path.join(os.path.dirname(__file__), "bm.png")
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
             tray_icon = QIcon(icon_path)
         else:
-            tray_icon = self.windowIcon()
-        # Fitur tray icon
-        self.tray = QSystemTrayIcon(tray_icon, self)
-        self.tray.setToolTip("B Messenger")
+            tray_icon = QIcon.fromTheme("system-run")
+        self.tray_icon = QSystemTrayIcon(tray_icon, self)
+        # Tooltip in English for tray icon
+        self.tray_icon.setToolTip("Click to show/hide, right-click for menu")
         tray_menu = QTrayMenu()
-        show_action = tray_menu.addAction("Show")
-        quit_action = tray_menu.addAction("Quit")
-        show_action.triggered.connect(self.showNormal)
-        quit_action.triggered.connect(QApplication.instance().quit)
-        self.tray.setContextMenu(tray_menu)
-        self.tray.activated.connect(self._on_tray_activated)
-        self.tray.show()
+        show_action = tray_menu.addAction(QIcon.fromTheme("view-visible"), "Show")
+        hide_action = tray_menu.addAction(QIcon.fromTheme("view-hidden"), "Hide")
+        quit_action = tray_menu.addAction(QIcon.fromTheme("application-exit"), "Quit")
+        show_action.triggered.connect(self.show_window)
+        hide_action.triggered.connect(self.hide_window)
+        quit_action.triggered.connect(self.close_app)
+        self.tray_icon.setContextMenu(tray_menu)
+        self.tray_icon.activated.connect(self.tray_icon_clicked)
+        self.tray_icon.show()
         self.chat_widgets = {}
         self.active_transfers = {} # Untuk melacak transfer file yang sedang berjalan
         self.setup_ui()
@@ -704,7 +706,8 @@ class MainWindow(QMainWindow):
         self.raise_()
         self.activateWindow()
         self.setWindowState(self.windowState() | Qt.WindowActive)
-        self.tray.showMessage("B Messenger", f"PING!!! from {from_user}", QSystemTrayIcon.Information, 2500)
+        # FIX: use self.tray_icon instead of self.tray
+        self.tray_icon.showMessage("B Messenger", f"PING!!! from {from_user}", QSystemTrayIcon.Information, 2500)
         for service_name, data in self.chat_widgets.items():
             if data['peer_data']['username'] == from_user:
                 widgets = data['widgets']
@@ -730,22 +733,35 @@ class MainWindow(QMainWindow):
         offset_x = (random.randint(0, 1) * 2 - 1) * 5; offset_y = (random.randint(0, 1) * 2 - 1) * 5
         self.move(self.original_pos.x() + offset_x, self.original_pos.y() + offset_y); self.shake_counter += 1
 
-    def _on_tray_activated(self, reason):
+    def tray_icon_clicked(self, reason):
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
-            # Pastikan window benar-benar muncul di depan dan aktif secara konsisten
-            self.showNormal()
-            self.raise_()
-            self.activateWindow()
-            self.setWindowState(self.windowState() & ~Qt.WindowMinimized | Qt.WindowActive)
-            self.show()
-            QApplication.processEvents()
-            # Tambahan: paksa fokus dan aktifkan window jika OS lambat
-            self.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
-            QTimer.singleShot(0, self.raise_)
-            QTimer.singleShot(0, self.activateWindow)
+            if self.isVisible():
+                self.hide_window()
+            else:
+                self.show_window()
+
+    def show_window(self):
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+        QApplication.processEvents()
+        self.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
+        QTimer.singleShot(0, self.raise_)
+        QTimer.singleShot(0, self.activateWindow)
+
+    def hide_window(self):
+        self.hide()
+
+    def close_app(self):
+        self.tray_icon.hide()
+        # Stop network manager only when quitting the app
+        self.network_manager.stop()
+        self.network_thread.quit()
+        self.network_thread.wait(2000)
+        QApplication.instance().quit()
 
     def closeEvent(self, event):
-        # Sembunyikan window, tetap jalan di tray
+        # Only hide window, do not stop network manager
         event.ignore()
         self.hide()
         # Hapus notifikasi tray saat benar-benar keluar aplikasi
@@ -756,7 +772,6 @@ class MainWindow(QMainWindow):
                 print(f"Closed dangling file handle for transfer {transfer_id}")
             except Exception as e:
                 print(f"Error closing file on exit: {e}")
-        self.network_manager.stop(); self.network_thread.quit(); self.network_thread.wait(2000)
 
 def ensure_certificates():
     # Jangan overwrite jika sudah ada
@@ -776,11 +791,11 @@ def ensure_certificates():
     return True
 
 if __name__ == "__main__":
-    if not ensure_certificates():
-        app_temp = QApplication(sys.argv)
-        error_box = QMessageBox(); error_box.setIcon(QMessageBox.Icon.Critical); error_box.setText(f"Could not create certificate files: '{CERTFILE}' & '{KEYFILE}'"); error_box.setInformativeText("Check OpenSSL installation and permissions."); error_box.setWindowTitle("Configuration Error"); error_box.exec()
-        sys.exit(1)
     app = QApplication(sys.argv)
+    # Pastikan aplikasi mendukung tray icon
+    if not QSystemTrayIcon.isSystemTrayAvailable():
+        print("System tray tidak tersedia!")
+        sys.exit(1)
     # Set theme KDE jika tersedia di sistem
     if QStyleFactory:
         if "breeze" in QStyleFactory.keys():
@@ -788,4 +803,6 @@ if __name__ == "__main__":
         elif "oxygen" in QStyleFactory.keys():
             app.setStyle(QStyleFactory.create("oxygen"))
         # Jika tidak ada, biarkan default
-    main_win = MainWindow(); main_win.show(); sys.exit(app.exec())
+    main_win = MainWindow()
+    main_win.show()
+    sys.exit(app.exec())
