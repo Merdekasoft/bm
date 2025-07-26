@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QListWidget, QListWidgetItem, QTextBrowser, QLineEdit, QPushButton, QStackedWidget,
     QLabel, QFileDialog, QProgressBar, QMenu, QMessageBox, QSizePolicy, QSpacerItem,
-    QScrollArea
+    QScrollArea, QSystemTrayIcon, QMenu as QTrayMenu
 )
 from PySide6.QtCore import QThread, Signal, QObject, Qt, QUrl, QTimer, QSize
 from PySide6.QtGui import (
@@ -103,33 +103,6 @@ class ChatListItem(QWidget):
         layout.addLayout(text_layout, 1)
         self.setMinimumHeight(68)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-
-class FileBubbleWidget(QWidget):
-    def __init__(self, filename, filesize, status=""):
-        super().__init__()
-        self.filename = filename
-        self.filesize = filesize
-        self.setStyleSheet("background: transparent;")
-        layout = QHBoxLayout(self); layout.setSpacing(10); layout.setContentsMargins(0,0,0,0)
-        file_icon_label = QLabel()
-        file_icon = create_icon_from_svg(ICONS['file'], APP_COLORS['icon_color'], QSize(36, 36))
-        file_icon_label.setPixmap(file_icon.pixmap(QSize(36, 36)))
-        layout.addWidget(file_icon_label)
-        text_layout = QVBoxLayout(); text_layout.setSpacing(2)
-        filename_label = QLabel(self.filename); filename_label.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold)); filename_label.setStyleSheet(f"color: {APP_COLORS['text_primary']};")
-        if self.filesize < 1024 * 1024: filesize_str = f"{self.filesize / 1024:.1f} KB"
-        else: filesize_str = f"{self.filesize / (1024 * 1024):.1f} MB"
-        self.filesize_label = QLabel(filesize_str); self.filesize_label.setFont(QFont("Segoe UI", 9)); self.filesize_label.setStyleSheet(f"color: {APP_COLORS['timestamp']};")
-        text_layout.addWidget(filename_label); text_layout.addWidget(self.filesize_label)
-        self.status_label = QLabel(status)
-        status_font = QFont("Segoe UI", 9)
-        status_font.setItalic(True) # Cara yang benar untuk membuat font miring
-        self.status_label.setFont(status_font)
-        text_layout.addWidget(self.status_label)
-        layout.addLayout(text_layout, 1)
-
-    def set_status(self, text):
-        self.status_label.setText(text)
 
 # --- Network Logic ---
 class ZeroconfListener:
@@ -220,11 +193,30 @@ class AdvancedNetworkManager(QObject):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        # Tambahkan icon aplikasi bm.png
+        icon_path = os.path.join(os.path.dirname(__file__), "bm.png")
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
+            tray_icon = QIcon(icon_path)
+        else:
+            tray_icon = self.windowIcon()
+        # Fitur tray icon
+        self.tray = QSystemTrayIcon(tray_icon, self)
+        self.tray.setToolTip("B Messenger")
+        tray_menu = QTrayMenu()
+        show_action = tray_menu.addAction("Show")
+        quit_action = tray_menu.addAction("Quit")
+        show_action.triggered.connect(self.showNormal)
+        quit_action.triggered.connect(QApplication.instance().quit)
+        self.tray.setContextMenu(tray_menu)
+        self.tray.activated.connect(self._on_tray_activated)
+        self.tray.show()
         self.chat_widgets = {}
         self.active_transfers = {} # Untuk melacak transfer file yang sedang berjalan
         self.setup_ui()
         self.setup_network()
         self.shake_timer = QTimer(self); self.shake_timer.timeout.connect(self._shake_step); self.shake_counter = 0
+        self.ping_sound_path = os.path.join(os.path.dirname(__file__), "ping.wav")
 
     def setup_ui(self):
         self.setWindowTitle("B Messenger"); self.setFont(QFont("Segoe UI", 10))
@@ -260,7 +252,6 @@ class MainWindow(QMainWindow):
         header_widget = QWidget(); header_widget.setFixedHeight(60)
         header_widget.setStyleSheet(f"background-color: {APP_COLORS['header_bg']}; border-bottom: 1px solid {APP_COLORS['input_border']}; padding: 0 10px;")
         header_layout = QHBoxLayout(header_widget); header_layout.setContentsMargins(0,0,0,0)
-        # Hapus tombol back, hanya tampilkan nama dan tombol ping
         header_label = QLabel(f"{username}"); header_label.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold)); header_label.setStyleSheet(f"color: {APP_COLORS['text_primary']};")
         ping_button = QPushButton(); ping_button.setIcon(create_icon_from_svg(ICONS['ping'], APP_COLORS['icon_color'])); ping_button.setIconSize(QSize(24, 24)); ping_button.setFixedSize(40, 40)
         ping_button.setCursor(Qt.CursorShape.PointingHandCursor); ping_button.setToolTip("Send a Ping!"); ping_button.setStyleSheet("QPushButton { background-color: transparent; border-radius: 20px; border: none; } QPushButton:hover { background-color: #E0E0E0; }")
@@ -275,15 +266,22 @@ class MainWindow(QMainWindow):
         scroll_layout = QVBoxLayout(scroll_content_widget)
         scroll_layout.addStretch()
         input_toolbar = QWidget(); input_toolbar.setMinimumHeight(62)
-        input_toolbar.setStyleSheet(f"background-color: {APP_COLORS['header_bg']}; border-top: 1px solid {APP_COLORS['input_border']}; padding: 8px 16px;")
+        # Perbaiki tampilan panel bawah input_field agar lebih rapi dan modern
+        input_toolbar.setStyleSheet(
+            f"""
+            QWidget {{
+                background-color: {APP_COLORS['header_bg']};
+                border-top: 1px solid {APP_COLORS['input_border']};
+                padding: 0px 16px;
+            }}
+            """
+        )
         it_layout = QHBoxLayout(input_toolbar); it_layout.setSpacing(15)
-        attach_button = QPushButton(); attach_button.setIcon(create_icon_from_svg(ICONS['attach'], APP_COLORS['icon_color'])); attach_button.setIconSize(QSize(28, 28)); attach_button.setFixedSize(40, 40)
-        attach_button.setCursor(Qt.CursorShape.PointingHandCursor); attach_button.setToolTip("Send File"); attach_button.setStyleSheet("QPushButton {background-color: transparent; border-radius: 20px; border: none;} QPushButton:hover {background-color: #E9EDEF;}")
-        attach_button.clicked.connect(lambda: self.prompt_send_file(service_name))
-        # Tambahkan tombol emoji
+        it_layout.setContentsMargins(0, 0, 0, 0)
+        # Hapus tombol attach
         emoji_button = QPushButton()
         emoji_button.setText("😊")
-        emoji_button.setFixedSize(48, 48)  # Lebih besar agar tidak terpotong
+        emoji_button.setFixedSize(48, 48)
         emoji_button.setCursor(Qt.CursorShape.PointingHandCursor)
         emoji_button.setToolTip("Insert Emoji")
         # Gunakan font emoji-aware dan font-size besar agar emoji berwarna & tidak terpotong
@@ -313,7 +311,21 @@ class MainWindow(QMainWindow):
         emoji_font.setPointSize(11)
         input_field.setFont(emoji_font)
         # Jangan set warna font agar emoji tetap native color
-        input_field.setStyleSheet(f"""QLineEdit {{ background-color: #FFFFFF; border: 1px solid {APP_COLORS['input_border']}; border-radius: 18px; padding: 8px 15px; }}""")
+        # Tambah padding atas dan bawah agar placeholder tidak terpotong
+        input_field.setStyleSheet(
+            f"""QLineEdit {{
+            background-color: {APP_COLORS['incoming_bg']};
+            border: none;
+            border-radius: 24px;
+            padding-left: 18px;
+            padding-right: 18px;
+            padding-top: 16px;
+            padding-bottom: 16px;
+            font-size: 16px;
+            color: {APP_COLORS['text_primary']};
+            box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+            }}"""
+        )
         send_button = QPushButton(); send_button.setIcon(create_icon_from_svg(ICONS['send'], APP_COLORS['icon_color'])); send_button.setIconSize(QSize(28, 28)); send_button.setFixedSize(40, 40)
         send_button.setCursor(Qt.CursorShape.PointingHandCursor); send_button.setToolTip("Send Message"); send_button.setStyleSheet("QPushButton {background-color: transparent; border-radius: 20px; border: none;} QPushButton:hover {background-color: #E9EDEF;}")
 
@@ -363,7 +375,7 @@ class MainWindow(QMainWindow):
             }
             dialog = QDialog(self)
             dialog.setWindowFlags(Qt.Popup)
-            dialog.setMinimumWidth(37 * 10 + 32)  # Lebar minimum agar tab tidak terlalu sempit
+            dialog.setMinimumWidth(37 * 10 + 32)
             layout = QVBoxLayout(dialog)
             tabs = QTabWidget(dialog)
             for cat, emojis in emoji_categories.items():
@@ -391,11 +403,15 @@ class MainWindow(QMainWindow):
                 tabs.addTab(tab, cat)
             layout.addWidget(tabs)
             dialog.setLayout(layout)
-            dialog.move(emoji_button.mapToGlobal(emoji_button.rect().bottomLeft()))
+            # --- Ubah posisi popup ke atas input_field ---
+            input_rect = input_field.rect()
+            input_global = input_field.mapToGlobal(input_rect.bottomLeft())
+            dialog_height = dialog.sizeHint().height()
+            # Geser ke atas setinggi dialog
+            dialog.move(input_global.x(), input_global.y() - dialog_height)
             dialog.exec()
         emoji_button.clicked.connect(show_emoji_popup)
 
-        it_layout.addWidget(attach_button)
         it_layout.addWidget(emoji_button)
         it_layout.addWidget(input_field, 1)
         it_layout.addWidget(send_button)
@@ -409,27 +425,45 @@ class MainWindow(QMainWindow):
         content_widget = None
         if msg_type == "text":
             text = msg_dict['content']
-            # Pisahkan emoji dan teks biasa, lalu buat HTML dengan emoji lebih besar
             import re
-            def repl(m):
-                # emoji unicode range (sederhana, tidak semua emoji)
-                return f"<span style='font-size:2em; vertical-align:middle;'>{m.group(0)}</span>"
-            # Regex: ambil emoji (unicode block umum)
+            # Deteksi dan ubah url menjadi tautan HTML (mendukung domain multi-level, angka, dan karakter khusus)
+            def linkify(match):
+                url = match.group(0)
+                if not url.startswith("http"):
+                    url = "https://" + url
+                # Hindari spasi di dalam link
+                return f"<a href='{url}' style='color:#2196F3;text-decoration:underline;'>{html.escape(match.group(0))}</a>"
+            # Regex: domain multi-level, subdomain, angka, path, query, port
+            url_pattern = re.compile(
+                r'(?<![\w@])'  # Hindari email dan kata
+                r'(?:https?://)?(?:www\.)?'
+                r'[a-zA-Z0-9\-]+(?:\.[a-zA-Z0-9\-]+)+'
+                r'(?:\:\d+)?(?:/[^\s<]*)?(?:\?[^\s<]*)?'
+                r'(?![\w])'  # Hindari gabung dengan kata lain
+            )
+            # Proses link dulu, lalu emoji
+            linked_text = url_pattern.sub(linkify, text)
             emoji_pattern = re.compile(
                 "["
-                "\U0001F600-\U0001F64F"  # emoticons
-                "\U0001F300-\U0001F5FF"  # symbols & pictographs
-                "\U0001F680-\U0001F6FF"  # transport & map symbols
-                "\U0001F1E0-\U0001F1FF"  # flags (iOS)
-                "\U00002700-\U000027BF"  # Dingbats
-                "\U0001F900-\U0001F9FF"  # Supplemental Symbols and Pictographs
-                "\U00002600-\U000026FF"  # Misc symbols
-                "\U00002B50"             # Star
-                "\U00002B06"             # Arrow
+                "\U0001F600-\U0001F64F"
+                "\U0001F300-\U0001F5FF"
+                "\U0001F680-\U0001F6FF"
+                "\U0001F1E0-\U0001F1FF"
+                "\U00002700-\U000027BF"
+                "\U0001F900-\U0001F9FF"
+                "\U00002600-\U000026FF"
+                "\U00002B50"
+                "\U00002B06"
                 "]+", flags=re.UNICODE)
-            # Escape HTML, lalu ganti emoji dengan tag besar
-            escaped = html.escape(text)
-            html_text = emoji_pattern.sub(repl, escaped)
+            # Jangan ubah emoji di dalam tag <a>
+            def repl(m):
+                # Cek apakah emoji berada di dalam tag <a>
+                before = linked_text[max(0, m.start()-10):m.start()]
+                after = linked_text[m.end():m.end()+10]
+                if '<a' in before and '</a>' in after:
+                    return m.group(0)
+                return f"<span style='font-size:2em; vertical-align:middle;'>{m.group(0)}</span>"
+            html_text = emoji_pattern.sub(repl, linked_text)
             display_text = f"<div style='color:{APP_COLORS['text_primary']};'>{html_text}</div>"
             content_widget = QLabel(display_text)
             content_widget.setWordWrap(True)
@@ -443,6 +477,7 @@ class MainWindow(QMainWindow):
             emoji_font.setPointSize(11)
             content_widget.setFont(emoji_font)
             content_widget.setTextFormat(Qt.TextFormat.RichText)
+            content_widget.setOpenExternalLinks(True)
         elif is_event:
             from_user = msg_dict.get("from_user")
             text = "PING!!! sent" if is_sent else f"PING!!! from {from_user}"
@@ -451,13 +486,6 @@ class MainWindow(QMainWindow):
             content_widget = QLabel(f"<span style='color:{APP_COLORS['ping_color']}; font-weight:bold;'>PING!!!</span>")
             content_widget.setWordWrap(True)
             content_widget.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
-        elif msg_type == "file_header":
-             status = "Mengirim..." if is_sent else "Menerima..."
-             content_widget = FileBubbleWidget(msg_dict['filename'], msg_dict['filesize'], status)
-             if not is_sent and 'transfer_id' in msg_dict:
-                 # Pastikan transfer ada sebelum mencoba mengaksesnya
-                 if msg_dict['transfer_id'] in self.active_transfers:
-                    self.active_transfers[msg_dict['transfer_id']]['bubble'] = content_widget
         if not content_widget:
              scroll_layout.addStretch(); return
         bubble_widget = QWidget()
@@ -536,58 +564,6 @@ class MainWindow(QMainWindow):
         self.add_message_to_history(widgets['scroll_area'], widgets['scroll_layout'], msg_dict, True)
         input_field.clear()
 
-    def _send_file_in_thread(self, file_path, transfer_id, peer_data):
-        try:
-            with open(file_path, 'rb') as f:
-                while True:
-                    chunk = f.read(CHUNK_SIZE)
-                    if not chunk:
-                        break
-                    b64_chunk = base64.b64encode(chunk).decode('ascii')
-                    chunk_msg = { "type": "file_chunk", "transfer_id": transfer_id, "data": b64_chunk }
-                    self.network_manager.send_tcp_message(peer_data, chunk_msg)
-            end_msg = { "type": "file_end", "transfer_id": transfer_id, "from_user": self.network_manager.username }
-            self.network_manager.send_tcp_message(peer_data, end_msg)
-            print(f"File transfer {transfer_id} completed.")
-        except Exception as e:
-            print(f"Error during file sending thread: {e}")
-
-    def prompt_send_file(self, target_service_name):
-        data = self.chat_widgets.get(target_service_name)
-        if not data: return
-        dialog = QFileDialog(self, "Pilih File untuk Dikirim")
-        dialog.setFileMode(QFileDialog.FileMode.ExistingFile)
-        if not dialog.exec(): return
-        file_path = dialog.selectedFiles()[0]
-        if not file_path: return
-        try:
-            filename = os.path.basename(file_path)
-            filesize = os.path.getsize(file_path)
-            transfer_id = str(uuid.uuid4())
-            header_msg = {
-                "type": "file_header", "filename": filename, "filesize": filesize,
-                "transfer_id": transfer_id, "timestamp": time.time(),
-                "from_user": self.network_manager.username
-            }
-            self.network_manager.send_tcp_message(data['peer_data'], header_msg)
-            widgets = data['widgets']
-            self.add_message_to_history(widgets['scroll_area'], widgets['scroll_layout'], header_msg, True)
-            thread = threading.Thread(target=self._send_file_in_thread, args=(file_path, transfer_id, data['peer_data']))
-            thread.daemon = True
-            thread.start()
-        except Exception as e:
-            print(f"Error preparing file send: {e}")
-            QMessageBox.critical(self, "File Error", f"Tidak dapat membaca atau mengirim file:\n{e}")
-
-    def send_ping(self, target_service_name):
-        data = self.chat_widgets.get(target_service_name)
-        if not data: return
-        widgets = data['widgets']
-        print(f"Sending PING! to {data['peer_data']['username']}")
-        msg_dict = {"type": "ping", "timestamp": time.time(), "from_user": self.network_manager.username}
-        self.network_manager.send_tcp_message(data['peer_data'], msg_dict)
-        self.add_message_to_history(widgets['scroll_area'], widgets['scroll_layout'], msg_dict, True)
-
     def handle_incoming_message(self, msg):
         msg_type = msg.get("type")
         from_user = msg.get("from_user")
@@ -596,73 +572,46 @@ class MainWindow(QMainWindow):
             if data['peer_data']['username'] == from_user:
                 target_widget_info = data
                 break
-        if not target_widget_info and msg_type not in ['file_header', 'ping']:
+        if not target_widget_info and msg_type not in ['ping']:
             return
 
-        if msg_type == 'file_header':
-            try:
-                transfer_id = msg['transfer_id']
-                downloads_path = str(Path.home() / "Downloads")
-                if not os.path.exists(downloads_path): os.makedirs(downloads_path)
-                base, extension = os.path.splitext(msg['filename'])
-                save_path = os.path.join(downloads_path, msg['filename'])
-                counter = 1
-                while os.path.exists(save_path):
-                    save_path = os.path.join(downloads_path, f"{base}_{counter}{extension}")
-                    counter += 1
-                file_handle = open(save_path, 'wb')
-                self.active_transfers[transfer_id] = {
-                    'file_handle': file_handle, 'path': save_path, 'bubble': None
-                }
-                print(f"Receiving file {msg['filename']} ({transfer_id}), saving to {save_path}")
-                if target_widget_info:
-                    self.add_message_to_history(target_widget_info['widgets']['scroll_area'], target_widget_info['widgets']['scroll_layout'], msg, False)
-            except Exception as e:
-                print(f"Error handling file header: {e}")
-        elif msg_type == 'file_chunk':
-            transfer_id = msg.get('transfer_id')
-            transfer = self.active_transfers.get(transfer_id)
-            if transfer:
-                try:
-                    chunk_data = base64.b64decode(msg['data'])
-                    transfer['file_handle'].write(chunk_data)
-                except Exception as e:
-                    print(f"Error writing chunk for {transfer_id}: {e}")
-        elif msg_type == 'file_end':
-            transfer_id = msg.get('transfer_id')
-            transfer = self.active_transfers.pop(transfer_id, None)
-            if transfer:
-                try:
-                    transfer['file_handle'].close()
-                    if transfer['bubble']:
-                        transfer['bubble'].set_status(f"Disimpan di Downloads")
-                    print(f"File transfer {transfer_id} finished. Saved to {transfer['path']}")
-                except Exception as e:
-                    print(f"Error finishing transfer for {transfer_id}: {e}")
-        elif msg_type == "ping":
+        if msg_type == "ping":
             self.handle_incoming_ping(msg)
         elif target_widget_info:
             self.add_message_to_history(target_widget_info['widgets']['scroll_area'], target_widget_info['widgets']['scroll_layout'], msg, False)
 
+    def send_ping(self, target_service_name):
+        # Kirim pesan ping ke lawan bicara
+        data = self.chat_widgets.get(target_service_name)
+        if not data: return
+        timestamp = time.time()
+        msg_dict = {"type": "ping", "timestamp": timestamp, "from_user": self.network_manager.username}
+        self.network_manager.send_tcp_message(data['peer_data'], msg_dict)
+        self.add_message_to_history(data['widgets']['scroll_area'], data['widgets']['scroll_layout'], msg_dict, True)
+        self.play_ping_sound()
+
     def handle_incoming_ping(self, msg):
-        from_user = msg.get("from_user"); print(f"PING!!! received from {from_user}")
+        from_user = msg.get("from_user")
+        print(f"PING!!! received from {from_user}")
         self.shake_window()
-        # Mainkan ping.mp3 jika ada, jika tidak fallback ke ping.wav
-        ping_sound_path = None
-        if os.path.exists("ping.mp3"):
-            ping_sound_path = "ping.mp3"
-        elif os.path.exists("ping.wav"):
-            ping_sound_path = "ping.wav"
-        if ping_sound_path:
-            self.ping_sound = QSoundEffect()
-            self.ping_sound.setSource(QUrl.fromLocalFile(ping_sound_path))
-            self.ping_sound.play()
+        self.play_ping_sound()
         for service_name, data in self.chat_widgets.items():
             if data['peer_data']['username'] == from_user:
                 widgets = data['widgets']
                 self.add_message_to_history(widgets['scroll_area'], widgets['scroll_layout'], msg, False)
                 break
-    
+
+    def play_ping_sound(self):
+        # Mainkan suara ping.wav jika ada
+        if os.path.exists(self.ping_sound_path):
+            self.ping_sound = QSoundEffect()
+            self.ping_sound.setSource(QUrl.fromLocalFile(self.ping_sound_path))
+            self.ping_sound.setVolume(1.0)
+            self.ping_sound.play()
+        else:
+            # fallback: tidak ada file, tidak mainkan suara
+            pass
+
     def shake_window(self):
         if self.shake_timer.isActive(): return
         self.original_pos = self.pos(); self.shake_counter = 0; self.shake_timer.start(20)
@@ -671,14 +620,28 @@ class MainWindow(QMainWindow):
         offset_x = (random.randint(0, 1) * 2 - 1) * 5; offset_y = (random.randint(0, 1) * 2 - 1) * 5
         self.move(self.original_pos.x() + offset_x, self.original_pos.y() + offset_y); self.shake_counter += 1
 
+    def _on_tray_activated(self, reason):
+        if reason == QSystemTrayIcon.ActivationReason.Trigger:
+            self.showNormal()
+            self.raise_()
+            self.activateWindow()
+            # Tambahkan fokus dan pastikan window di depan
+            self.setWindowState(self.windowState() & ~Qt.WindowMinimized | Qt.WindowActive)
+            self.show()
+            QApplication.processEvents()
+
     def closeEvent(self, event):
+        # Sembunyikan window, tetap jalan di tray
+        event.ignore()
+        self.hide()
+        self.tray.showMessage("B Messenger", "The application is still running in the tray.", QSystemTrayIcon.Information, 2000)
         for transfer_id, transfer_data in list(self.active_transfers.items()):
             try:
                 transfer_data['file_handle'].close()
                 print(f"Closed dangling file handle for transfer {transfer_id}")
             except Exception as e:
                 print(f"Error closing file on exit: {e}")
-        self.network_manager.stop(); self.network_thread.quit(); self.network_thread.wait(2000); event.accept()
+        self.network_manager.stop(); self.network_thread.quit(); self.network_thread.wait(2000)
 
 def ensure_certificates():
     # Jangan overwrite jika sudah ada
