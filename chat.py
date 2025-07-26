@@ -19,6 +19,7 @@ from pathlib import Path
 from datetime import datetime
 from zeroconf import ServiceInfo, Zeroconf, ServiceBrowser
 import subprocess
+import glob
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
@@ -89,16 +90,26 @@ class ChatListItem(QWidget):
         layout.setContentsMargins(12, 8, 12, 8)
         layout.setSpacing(0)
         self.profile_pic_label = QLabel()
-        icon_pixmap = create_icon_from_svg(ICONS['user'], color=APP_COLORS["icon_color"], size=QSize(42, 42)).pixmap(QSize(42, 42))
-        self.profile_pic_label.setPixmap(make_circular_pixmap(icon_pixmap))
+        # --- Tambahkan foto acak dari /usr/share/plasma/avatars/photos/ jika tersedia ---
+        avatar_dir = "/usr/share/plasma/avatars/photos/"
+        avatar_files = glob.glob(os.path.join(avatar_dir, "*.jpg")) + glob.glob(os.path.join(avatar_dir, "*.png"))
+        if avatar_files:
+            avatar_path = random.choice(avatar_files)
+            pixmap = QPixmap(avatar_path).scaled(42, 42, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            self.profile_pic_label.setPixmap(make_circular_pixmap(pixmap))
+        else:
+            icon_pixmap = create_icon_from_svg(ICONS['user'], color=APP_COLORS["icon_color"], size=QSize(42, 42)).pixmap(QSize(42, 42))
+            self.profile_pic_label.setPixmap(make_circular_pixmap(icon_pixmap))
         layout.addWidget(self.profile_pic_label)
         text_layout = QVBoxLayout()
         text_layout.setContentsMargins(12, 0, 0, 0)
         text_layout.setSpacing(0)
+        # --- Perbaikan: urutan dan penempatan username_label agar selalu di tengah vertikal ---
+        text_layout.addStretch()
         self.username_label = QLabel(user_label)
         self.username_label.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
         self.username_label.setStyleSheet(f"color: {APP_COLORS['text_primary']};")
-        text_layout.addWidget(self.username_label)
+        text_layout.addWidget(self.username_label, alignment=Qt.AlignmentFlag.AlignVCenter)
         text_layout.addStretch()
         layout.addLayout(text_layout, 1)
         self.setMinimumHeight(68)
@@ -202,7 +213,9 @@ class AdvancedNetworkManager(QObject):
                     ssock.sendall(message_bytes)
         except Exception as e:
             print(f"Failed to send message to {peer_info['username']}: {e}")
-            self.user_went_offline.emit(peer_info['name'])
+            # --- Perbaikan: Jangan emit user_went_offline jika kirim ping ---
+            if message_dict.get("type") != "ping":
+                self.user_went_offline.emit(peer_info['name'])
 
 # --- Main Application Window ---
 class MainWindow(QMainWindow):
@@ -258,7 +271,8 @@ class MainWindow(QMainWindow):
                 font-size: 15px;
             }}
             QListWidget::item {{
-                border-bottom: 1px solid {APP_COLORS['input_border']};
+                /* Hapus garis bawah yang mengganggu */
+                border-bottom: none;
                 padding: 8px 0;
                 margin: 0;
             }}
@@ -602,7 +616,17 @@ class MainWindow(QMainWindow):
         else:
             container_layout.addWidget(bubble_widget); container_layout.addStretch()
         scroll_layout.addWidget(container_widget); scroll_layout.addStretch()
-        QTimer.singleShot(50, lambda: scroll_area.verticalScrollBar().setValue(scroll_area.verticalScrollBar().maximum()))
+        # Perbaikan: Hindari error jika scroll_area sudah dihapus
+        def safe_scroll_to_bottom():
+            try:
+                # Cek apakah widget sudah dihapus/dihancurkan
+                if scroll_area is not None and hasattr(scroll_area, "verticalScrollBar"):
+                    sb = scroll_area.verticalScrollBar()
+                    if sb is not None:
+                        sb.setValue(sb.maximum())
+            except Exception:
+                pass
+        QTimer.singleShot(50, safe_scroll_to_bottom)
 
     def setup_network(self):
         self.network_thread = QThread(); self.network_manager = AdvancedNetworkManager()
@@ -662,6 +686,10 @@ class MainWindow(QMainWindow):
         input_field = widgets['input_field']
         message = input_field.text().strip()
         if not message: return
+        # --- Perbaikan: Pastikan item tetap terpilih setelah kirim pesan ---
+        item = data.get("item")
+        if item:
+            self.chat_list_widget.setCurrentItem(item)
         if message.lower() == 'p':
             self.send_ping(target_service_name)
             input_field.clear()
