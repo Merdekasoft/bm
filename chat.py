@@ -82,7 +82,7 @@ def create_icon_from_svg(svg_string, color="currentColor", size=QSize(24, 24)):
     return QIcon(pixmap)
 
 class ChatListItem(QWidget):
-    def __init__(self, username):
+    def __init__(self, user_label):
         super().__init__()
         self.setStyleSheet("background: transparent;")
         layout = QHBoxLayout(self)
@@ -95,7 +95,7 @@ class ChatListItem(QWidget):
         text_layout = QVBoxLayout()
         text_layout.setContentsMargins(12, 0, 0, 0)
         text_layout.setSpacing(0)
-        self.username_label = QLabel(username)
+        self.username_label = QLabel(user_label)
         self.username_label.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
         self.username_label.setStyleSheet(f"color: {APP_COLORS['text_primary']};")
         text_layout.addWidget(self.username_label)
@@ -123,9 +123,20 @@ class AdvancedNetworkManager(QObject):
     user_discovered = Signal(dict); user_went_offline = Signal(str); private_message_received = Signal(dict)
     def __init__(self):
         super().__init__()
-        self.username = getpass.getuser(); self.my_ip = self._get_local_ip(); self.port = self._get_free_port()
-        self.running = True; self.zeroconf = Zeroconf(); self.listener = ZeroconfListener(self); self.browser = None
-        self.service_info = ServiceInfo(SERVICE_TYPE, f"{self.username}._S.{SERVICE_TYPE}", addresses=[socket.inet_aton(self.my_ip)], port=self.port, properties={'username': self.username})
+        self.username = getpass.getuser()
+        self.my_ip = self._get_local_ip()
+        self.port = self._get_free_port()
+        self.running = True
+        self.zeroconf = Zeroconf(ip_version=socket.AF_INET)  # Pastikan pakai IPv4
+        self.listener = ZeroconfListener(self)
+        self.browser = None
+        self.service_info = ServiceInfo(
+            SERVICE_TYPE,
+            f"{self.username}._S.{SERVICE_TYPE}",
+            addresses=[socket.inet_aton(self.my_ip)],
+            port=self.port,
+            properties={'username': self.username}
+        )
     def _get_local_ip(self):
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             try: s.connect(("8.8.8.8", 80)); return s.getsockname()[0]
@@ -133,6 +144,10 @@ class AdvancedNetworkManager(QObject):
     def _get_free_port(self):
         with socket.socket() as s: s.bind(('', 0)); return s.getsockname()[1]
     def start_discovery(self):
+        # Pastikan browser dan register_service dipanggil setelah event loop berjalan
+        QTimer.singleShot(0, self._start_zeroconf)
+
+    def _start_zeroconf(self):
         self.browser = ServiceBrowser(self.zeroconf, SERVICE_TYPE, self.listener)
         self.zeroconf.register_service(self.service_info)
         print(f"Announcing self: {self.username} at {self.my_ip}:{self.port}")
@@ -259,7 +274,32 @@ class MainWindow(QMainWindow):
         header_layout.addWidget(header_label); header_layout.addStretch(); header_layout.addWidget(ping_button)
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
-        scroll_area.setStyleSheet(f"QScrollArea {{ border: none; background-color: {APP_COLORS['chat_bg']}; }}")
+        # Perkecil scrollbar dengan stylesheet
+        scroll_area.setStyleSheet(f"""
+            QScrollArea {{
+                border: none;
+                background-color: {APP_COLORS['chat_bg']};
+            }}
+            QScrollBar:vertical {{
+                width: 8px;
+                background: #F0F2F5;
+                margin: 0px;
+                border-radius: 4px;
+            }}
+            QScrollBar::handle:vertical {{
+                background: #d1d7db;
+                min-height: 24px;
+                border-radius: 4px;
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                height: 0px;
+                background: none;
+                border: none;
+            }}
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+                background: none;
+            }}
+        """)
         scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll_content_widget = QWidget()
         scroll_area.setWidget(scroll_content_widget)
@@ -300,18 +340,9 @@ class MainWindow(QMainWindow):
             "QPushButton:hover {background-color: #E9EDEF;}"
         )
         input_field = QLineEdit(placeholderText="Type a message...")
-        # Set font emoji-aware agar emoji tetap berwarna di QLineEdit
-        emoji_font = QFont()
-        for fname in ["Segoe UI Emoji", "Noto Color Emoji", "Apple Color Emoji"]:
-            emoji_font.setFamily(fname)
-            if QFont(fname).exactMatch():
-                break
-        else:
-            emoji_font.setFamily("Segoe UI")
-        emoji_font.setPointSize(11)
-        input_field.setFont(emoji_font)
-        # Jangan set warna font agar emoji tetap native color
-        # Tambah padding atas dan bawah agar placeholder tidak terpotong
+        # Set font family ke Segoe UI agar angka dan huruf konsisten, emoji tetap muncul jika tersedia
+        normal_font = QFont("Segoe UI", 11)
+        input_field.setFont(normal_font)
         input_field.setStyleSheet(
             f"""QLineEdit {{
             background-color: {APP_COLORS['incoming_bg']};
@@ -321,7 +352,6 @@ class MainWindow(QMainWindow):
             padding-right: 18px;
             padding-top: 16px;
             padding-bottom: 16px;
-            font-size: 16px;
             color: {APP_COLORS['text_primary']};
             box-shadow: 0 1px 2px rgba(0,0,0,0.04);
             }}"""
@@ -426,22 +456,21 @@ class MainWindow(QMainWindow):
         if msg_type == "text":
             text = msg_dict['content']
             import re
-            # Deteksi dan ubah url menjadi tautan HTML (mendukung domain multi-level, angka, dan karakter khusus)
+            # Perbaiki regex agar domain dengan angka tidak terpecah dan link browser tetap aktif
             def linkify(match):
                 url = match.group(0)
                 if not url.startswith("http"):
                     url = "https://" + url
-                # Hindari spasi di dalam link
                 return f"<a href='{url}' style='color:#2196F3;text-decoration:underline;'>{html.escape(match.group(0))}</a>"
-            # Regex: domain multi-level, subdomain, angka, path, query, port
+            # Regex: domain/subdomain/angka/titik tanpa spasi di antara digit dan titik
             url_pattern = re.compile(
                 r'(?<![\w@])'  # Hindari email dan kata
                 r'(?:https?://)?(?:www\.)?'
-                r'[a-zA-Z0-9\-]+(?:\.[a-zA-Z0-9\-]+)+'
-                r'(?:\:\d+)?(?:/[^\s<]*)?(?:\?[^\s<]*)?'
+                r'(?:[a-zA-Z0-9\-]+\.)+[a-zA-Z]{2,}'  # domain/subdomain/angka/titik
+                r'(?:\:\d+)?(?:/[^\s<]*)?(?:\?[^\s<]*)?'  # port, path, query
                 r'(?![\w])'  # Hindari gabung dengan kata lain
             )
-            # Proses link dulu, lalu emoji
+            # Substitusi link tanpa menghapus spasi
             linked_text = url_pattern.sub(linkify, text)
             emoji_pattern = re.compile(
                 "["
@@ -523,10 +552,25 @@ class MainWindow(QMainWindow):
         service_name = peer_data['name']
         if service_name in self.chat_widgets: return
         username = peer_data['username']
+        # Gunakan os.uname().nodename untuk hostname lokal, address untuk peer lain
+        try:
+            local_hostname = os.uname().nodename
+            # Jika username sama dengan user lokal, tampilkan hostname lokal
+            if username == getpass.getuser():
+                host = local_hostname
+            else:
+                host = peer_data.get('address', '')
+        except Exception:
+            host = peer_data.get('address', '')
+        user_label = f"{username}@{host}"
         page, widgets = self._create_chat_page(username, service_name)
         self.chat_area.addWidget(page)
-        item = QListWidgetItem(); item_widget = ChatListItem(username); item.setSizeHint(item_widget.sizeHint()); item.setData(Qt.UserRole, peer_data)
-        self.chat_list_widget.addItem(item); self.chat_list_widget.setItemWidget(item, item_widget)
+        item = QListWidgetItem()
+        item_widget = ChatListItem(user_label)
+        item.setSizeHint(item_widget.sizeHint())
+        item.setData(Qt.UserRole, peer_data)
+        self.chat_list_widget.addItem(item)
+        self.chat_list_widget.setItemWidget(item, item_widget)
         widgets["send_button"].clicked.connect(lambda _, s=service_name: self.send_private_message(s))
         widgets["input_field"].returnPressed.connect(lambda s=service_name: self.send_private_message(s))
         self.chat_widgets[service_name] = {"page": page, "item": item, "widgets": widgets, "peer_data": peer_data}
