@@ -227,24 +227,24 @@ class AdvancedNetworkManager(QObject):
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE
         try:
-            with socket.create_connection((peer_info['address'], peer_info['port']), timeout=5) as sock:
-                with context.wrap_socket(sock, server_hostname=peer_info['address']) as ssock:
+            # --- FIX: Use peer_info['address'] as string, ensure it's not empty ---
+            address = peer_info.get('address')
+            port = peer_info.get('port')
+            if not address or not port:
+                print(f"Cannot send message: missing address or port for peer {peer_info}")
+                return
+            with socket.create_connection((address, port), timeout=5) as sock:
+                with context.wrap_socket(sock, server_hostname=address) as ssock:
                     message_bytes = json.dumps(message_dict).encode('utf-8')
                     # Prefix each message with its length (4-byte integer)
                     ssock.sendall(struct.pack('>I', len(message_bytes)))
                     ssock.sendall(message_bytes)
         except (ConnectionRefusedError, socket.timeout, OSError) as e:
-            print(f"Failed to send message to {peer_info['username']} at {peer_info['address']}:{peer_info['port']}: {e}")
-            # --- FIX: Instead of immediately removing the user, just log the error.
-            # The user will be removed organically when Zeroconf sends the remove_service signal
-            # if they truly went offline. This prevents removing users due to a single failed message
-            # which could be a temporary network hiccup.
-            #
-            # The following line is commented out to implement the fix:
+            print(f"Failed to send message to {peer_info.get('username')} at {peer_info.get('address')}:{peer_info.get('port')}: {e}")
             # self.user_went_offline.emit(peer_info['name'])
-            pass # Silently ignore the error for a better user experience
+            pass
         except Exception as e:
-            print(f"An unexpected error occurred when sending a message to {peer_info['username']}: {e}")
+            print(f"An unexpected error occurred when sending a message to {peer_info.get('username')}: {e}")
 # ...existing code...
 # --- Main Application Window ---
 class MainWindow(QMainWindow):
