@@ -19,7 +19,6 @@ from pathlib import Path
 from datetime import datetime
 from zeroconf import ServiceInfo, Zeroconf, ServiceBrowser
 import subprocess
-import glob
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
@@ -83,35 +82,44 @@ def create_icon_from_svg(svg_string, color="currentColor", size=QSize(24, 24)):
     return QIcon(pixmap)
 
 class ChatListItem(QWidget):
-    def __init__(self, user_label):
+    def __init__(self, user_label, avatar_path=None):
         super().__init__()
         self.setStyleSheet("background: transparent;")
+        # Layout utama menggunakan QHBoxLayout
         layout = QHBoxLayout(self)
         layout.setContentsMargins(12, 8, 12, 8)
-        layout.setSpacing(0)
+        layout.setSpacing(12)
+        # Atur agar semua widget di dalam layout ini rata tengah secara vertikal
+        layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+
         self.profile_pic_label = QLabel()
-        # --- Tambahkan foto acak dari /usr/share/plasma/avatars/photos/ jika tersedia ---
-        avatar_dir = "/usr/share/plasma/avatars/photos/"
-        avatar_files = glob.glob(os.path.join(avatar_dir, "*.jpg")) + glob.glob(os.path.join(avatar_dir, "*.png"))
-        if avatar_files:
-            avatar_path = random.choice(avatar_files)
-            pixmap = QPixmap(avatar_path).scaled(42, 42, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        self.profile_pic_label.setFixedSize(42, 42)
+        if avatar_path and os.path.exists(avatar_path):
+            pixmap = QPixmap(avatar_path).scaled(42, 42, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             self.profile_pic_label.setPixmap(make_circular_pixmap(pixmap))
         else:
+            # Menggunakan fungsi yang ada untuk membuat ikon dari SVG
             icon_pixmap = create_icon_from_svg(ICONS['user'], color=APP_COLORS["icon_color"], size=QSize(42, 42)).pixmap(QSize(42, 42))
             self.profile_pic_label.setPixmap(make_circular_pixmap(icon_pixmap))
+
+        # Tambahkan avatar langsung ke layout utama
         layout.addWidget(self.profile_pic_label)
+
+        # Buat layout untuk teks (username)
         text_layout = QVBoxLayout()
-        text_layout.setContentsMargins(12, 0, 0, 0)
+        text_layout.setContentsMargins(0, 0, 0, 0)
         text_layout.setSpacing(0)
-        # --- Perbaikan: urutan dan penempatan username_label agar selalu di tengah vertikal ---
-        text_layout.addStretch()
+
         self.username_label = QLabel(user_label)
         self.username_label.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
         self.username_label.setStyleSheet(f"color: {APP_COLORS['text_primary']};")
-        text_layout.addWidget(self.username_label, alignment=Qt.AlignmentFlag.AlignVCenter)
-        text_layout.addStretch()
+
+        # Tidak perlu alignment di sini karena sudah diatur di layout utama
+        text_layout.addWidget(self.username_label)
+
+        # Tambahkan layout teks ke layout utama
         layout.addLayout(text_layout, 1)
+
         self.setMinimumHeight(68)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
@@ -125,15 +133,9 @@ class ZeroconfListener:
             my_hostname = socket.gethostname()
             # FIX: add missing closing bracket for the list (syntax error)
             if info and info.server not in [f"{my_hostname}.local.", f"{my_hostname}."]:
-                peer_data = {
-                    "name": name,
-                    "username": info.properties.get(b'username', b'unknown').decode('utf-8'),
-                    "address": socket.inet_ntoa(info.addresses[0]),
-                    "port": info.port
-                }
+                peer_data = {"name": name, "username": info.properties.get(b'username', b'unknown').decode('utf-8'), "address": socket.inet_ntoa(info.addresses[0]), "port": info.port}
                 self.network_manager.user_discovered.emit(peer_data)
-        except Exception as e:
-            print(f"Error processing service {name}: {e}")
+        except Exception as e: print(f"Error processing service {name}: {e}")
     def update_service(self, zeroconf, type, name): self.add_service(zeroconf, type, name)
 
 class AdvancedNetworkManager(QObject):
@@ -166,7 +168,19 @@ class AdvancedNetworkManager(QObject):
 
     def _start_zeroconf(self):
         self.browser = ServiceBrowser(self.zeroconf, SERVICE_TYPE, self.listener)
-        self.zeroconf.register_service(self.service_info)
+        try:
+            self.zeroconf.register_service(self.service_info)
+        except Exception as e:
+            print(f"Zeroconf register_service error: {e}")
+            # Jika NonUniqueNameException, ganti nama unik lalu coba lagi
+            if type(e).__name__ == "NonUniqueNameException":
+                import uuid
+                unique_id = uuid.uuid4().hex[:8]
+                self.service_info.name = f"{self.username}-{unique_id}._S.{SERVICE_TYPE}"
+                try:
+                    self.zeroconf.register_service(self.service_info)
+                except Exception as e2:
+                    print(f"Failed to register service after renaming: {e2}")
         print(f"Announcing self: {self.username} at {self.my_ip}:{self.port}")
         threading.Thread(target=self.run_tls_server, daemon=True).start()
     def stop(self):
@@ -219,38 +233,48 @@ class AdvancedNetworkManager(QObject):
                     ssock.sendall(message_bytes)
         except Exception as e:
             print(f"Failed to send message to {peer_info['username']}: {e}")
-            # --- Perbaikan: Jangan emit user_went_offline jika kirim ping ---
-            if message_dict.get("type") != "ping":
-                self.user_went_offline.emit(peer_info['name'])
+            # Notify MainWindow to show tray message if connection refused
+            if hasattr(self, "main_window") and isinstance(e, ConnectionRefusedError):
+                self.main_window.tray.showMessage(
+                    "B Messenger",
+                    f"Failed to send message to {peer_info['username']}: Connection refused",
+                    QSystemTrayIcon.Warning,
+                    2500
+                )
+            self.user_went_offline.emit(peer_info['name'])
 
 # --- Main Application Window ---
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        # Tray icon setup (modifikasi agar sesuai permintaan)
+        # Gunakan icon aplikasi bm.png (pastikan bm.png ada di folder yang sama dengan chat.py)
         icon_path = os.path.join(os.path.dirname(__file__), "bm.png")
-        if os.path.exists(icon_path):
-            self.setWindowIcon(QIcon(icon_path))
-            tray_icon = QIcon(icon_path)
-        else:
-            tray_icon = QIcon.fromTheme("system-run")
-        self.tray_icon = QSystemTrayIcon(tray_icon, self)
-        # Tooltip in English for tray icon
-        self.tray_icon.setToolTip("Click to show/hide, right-click for menu")
+        tray_icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon()
+        self.setWindowIcon(tray_icon)
+        # Pakai bm.png untuk tray icon, tidak menggunakan icon dari system theme
+        self.tray = QSystemTrayIcon(tray_icon, self)
+        self.tray.setToolTip("B Messenger")
         tray_menu = QTrayMenu()
         show_action = tray_menu.addAction(QIcon.fromTheme("view-visible"), "Show")
         hide_action = tray_menu.addAction(QIcon.fromTheme("view-hidden"), "Hide")
         quit_action = tray_menu.addAction(QIcon.fromTheme("application-exit"), "Quit")
-        show_action.triggered.connect(self.show_window)
-        hide_action.triggered.connect(self.hide_window)
-        quit_action.triggered.connect(self.close_app)
-        self.tray_icon.setContextMenu(tray_menu)
-        self.tray_icon.activated.connect(self.tray_icon_clicked)
-        self.tray_icon.show()
+        show_action.triggered.connect(self.showNormal)
+        hide_action.triggered.connect(self.hide)
+        quit_action.triggered.connect(self.quit_app)
+        self.tray.setContextMenu(tray_menu)
+        self.tray.activated.connect(self._on_tray_activated)
+        self.tray.show()
         self.chat_widgets = {}
         self.active_transfers = {} # Untuk melacak transfer file yang sedang berjalan
+        # Ambil daftar foto avatar
+        self.avatar_dir = "/usr/share/plasma/avatars/photos/"
+        self.avatar_files = [os.path.join(self.avatar_dir, f) for f in os.listdir(self.avatar_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg'))] if os.path.exists(self.avatar_dir) else []
+        # Pilih avatar default (acak atau pertama)
+        self.my_avatar = self.avatar_files[0] if self.avatar_files else None
         self.setup_ui()
         self.setup_network()
+        # Link network_manager to this window for tray notifications
+        self.network_manager.main_window = self
         self.shake_timer = QTimer(self); self.shake_timer.timeout.connect(self._shake_step); self.shake_counter = 0
         self.ping_sound_path = os.path.join(os.path.dirname(__file__), "ping.wav")
 
@@ -265,7 +289,7 @@ class MainWindow(QMainWindow):
         self.left_panel = QWidget(); self.left_panel.setMinimumWidth(260); self.left_panel.setMaximumWidth(400)
         self.left_panel.setStyleSheet(f"""
             background-color: {APP_COLORS['sidebar_bg']};
-            border-right: 1px solid {APP_COLORS['input_border']};
+            /* border-right: 1px solid {APP_COLORS['input_border']}; Dihapus */
         """)
         left_layout = QVBoxLayout(self.left_panel); left_layout.setContentsMargins(0, 0, 0, 0)
         self.chat_list_widget = QListWidget()
@@ -277,14 +301,14 @@ class MainWindow(QMainWindow):
                 font-size: 15px;
             }}
             QListWidget::item {{
-                /* Hapus garis bawah yang mengganggu */
-                border-bottom: none;
+                /* border-bottom: 1px solid {APP_COLORS['input_border']}; Dihapus */
                 padding: 8px 0;
                 margin: 0;
             }}
             QListWidget::item:selected, QListWidget::item:hover {{
                 background-color: {APP_COLORS['active_chat']};
                 border-radius: 8px;
+                padding: 8px; /* Menambahkan padding saat item dipilih/hover */
             }}
             QScrollBar:vertical {{
                 width: 7px;
@@ -445,7 +469,7 @@ class MainWindow(QMainWindow):
 
         # Fungsi popup emoji dengan tab kategori
         def show_emoji_popup():
-            from PySide6.QtWidgets import QDialog, QTabWidget, QWidget, QGridLayout, QPushButton, QVBoxLayout
+            from PySide6.QtWidgets import QDialog, QTabWidget, QWidget, QGridLayout, QPushButton, QVBoxLayout, QApplication
             # Kategori emoji
             emoji_categories = {
                 "Smileys": [
@@ -490,6 +514,14 @@ class MainWindow(QMainWindow):
             dialog = QDialog(self)
             dialog.setWindowFlags(Qt.Popup)
             dialog.setMinimumWidth(37 * 10 + 32)
+            # Terapkan style system pada emoji popup
+            if QStyleFactory:
+                # Pilih theme system jika tersedia
+                available_styles = QStyleFactory.keys()
+                for style_name in ["breeze", "fusion", "windows", "gtk", "oxygen"]:
+                    if style_name in available_styles:
+                        dialog.setStyle(QStyleFactory.create(style_name))
+                        break
             layout = QVBoxLayout(dialog)
             tabs = QTabWidget(dialog)
             for cat, emojis in emoji_categories.items():
@@ -521,7 +553,6 @@ class MainWindow(QMainWindow):
             input_rect = input_field.rect()
             input_global = input_field.mapToGlobal(input_rect.bottomLeft())
             dialog_height = dialog.sizeHint().height()
-            # Geser ke atas setinggi dialog
             dialog.move(input_global.x(), input_global.y() - dialog_height)
             dialog.exec()
         emoji_button.clicked.connect(show_emoji_popup)
@@ -622,17 +653,12 @@ class MainWindow(QMainWindow):
         else:
             container_layout.addWidget(bubble_widget); container_layout.addStretch()
         scroll_layout.addWidget(container_widget); scroll_layout.addStretch()
-        # Perbaikan: Hindari error jika scroll_area sudah dihapus
-        def safe_scroll_to_bottom():
+        def safe_scroll():
             try:
-                # Cek apakah widget sudah dihapus/dihancurkan
-                if scroll_area is not None and hasattr(scroll_area, "verticalScrollBar"):
-                    sb = scroll_area.verticalScrollBar()
-                    if sb is not None:
-                        sb.setValue(sb.maximum())
-            except Exception:
-                pass
-        QTimer.singleShot(50, safe_scroll_to_bottom)
+                scroll_area.verticalScrollBar().setValue(scroll_area.verticalScrollBar().maximum())
+            except RuntimeError:
+                pass  # Widget already deleted, ignore
+        QTimer.singleShot(50, safe_scroll)
 
     def setup_network(self):
         self.network_thread = QThread(); self.network_manager = AdvancedNetworkManager()
@@ -657,10 +683,16 @@ class MainWindow(QMainWindow):
         except Exception:
             host = peer_data.get('address', '')
         user_label = f"{username}@{host}"
+        # Pilih avatar untuk user (misal: berdasarkan urutan, atau acak, atau default)
+        avatar_path = None
+        if self.avatar_files:
+            # Untuk demo: pilih avatar berdasarkan hash username agar konsisten
+            idx = abs(hash(username)) % len(self.avatar_files)
+            avatar_path = self.avatar_files[idx]
         page, widgets = self._create_chat_page(username, service_name)
         self.chat_area.addWidget(page)
         item = QListWidgetItem()
-        item_widget = ChatListItem(user_label)
+        item_widget = ChatListItem(user_label, avatar_path)
         item.setSizeHint(item_widget.sizeHint())
         item.setData(Qt.UserRole, peer_data)
         self.chat_list_widget.addItem(item)
@@ -692,10 +724,6 @@ class MainWindow(QMainWindow):
         input_field = widgets['input_field']
         message = input_field.text().strip()
         if not message: return
-        # --- Perbaikan: Pastikan item tetap terpilih setelah kirim pesan ---
-        item = data.get("item")
-        if item:
-            self.chat_list_widget.setCurrentItem(item)
         if message.lower() == 'p':
             self.send_ping(target_service_name)
             input_field.clear()
@@ -740,8 +768,7 @@ class MainWindow(QMainWindow):
         self.raise_()
         self.activateWindow()
         self.setWindowState(self.windowState() | Qt.WindowActive)
-        # FIX: use self.tray_icon instead of self.tray
-        self.tray_icon.showMessage("B Messenger", f"PING!!! from {from_user}", QSystemTrayIcon.Information, 2500)
+        self.tray.showMessage("B Messenger", f"PING!!! from {from_user}", QSystemTrayIcon.Information, 2500)
         for service_name, data in self.chat_widgets.items():
             if data['peer_data']['username'] == from_user:
                 widgets = data['widgets']
@@ -767,62 +794,34 @@ class MainWindow(QMainWindow):
         offset_x = (random.randint(0, 1) * 2 - 1) * 5; offset_y = (random.randint(0, 1) * 2 - 1) * 5
         self.move(self.original_pos.x() + offset_x, self.original_pos.y() + offset_y); self.shake_counter += 1
 
-    def tray_icon_clicked(self, reason):
+    def _on_tray_activated(self, reason):
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
+            # Toggle show/hide window saat tray icon diklik kiri
             if self.isVisible():
-                self.hide_window()
+                self.hide()
             else:
-                self.show_window()
+                self.showNormal()
+                self.raise_()
+                self.activateWindow()
+                self.setWindowState(self.windowState() & ~Qt.WindowMinimized | Qt.WindowActive)
+                QApplication.processEvents()
+                self.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
+                QTimer.singleShot(0, self.raise_)
+                QTimer.singleShot(0, self.activateWindow)
 
-    def show_window(self):
-        self.showNormal()
-        self.raise_()
-        self.activateWindow()
-        QApplication.processEvents()
-        self.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
-        QTimer.singleShot(0, self.raise_)
-        QTimer.singleShot(0, self.activateWindow)
-
-    def hide_window(self):
+    def closeEvent(self, event):
+        # Saat tombol close ditekan, hanya hide window, aplikasi tetap berjalan di tray
+        event.ignore()
         self.hide()
+        # Jangan panggil self.network_manager.stop() di sini!
 
-    def close_app(self):
-        self.tray_icon.hide()
-        # Stop network manager only when quitting the app
+    def quit_app(self):
+        # Panggil ini dari aksi Quit pada tray menu
         self.network_manager.stop()
         self.network_thread.quit()
         self.network_thread.wait(2000)
+        self.tray.hide()
         QApplication.instance().quit()
-
-    def closeEvent(self, event):
-        # Only hide window, do not stop network manager
-        event.ignore()
-        self.hide()
-        # Hapus notifikasi tray saat benar-benar keluar aplikasi
-        # self.tray.showMessage("B Messenger", "The application is still running in the tray.", QSystemTrayIcon.Information, 2000)
-        for transfer_id, transfer_data in list(self.active_transfers.items()):
-            try:
-                transfer_data['file_handle'].close()
-                print(f"Closed dangling file handle for transfer {transfer_id}")
-            except Exception as e:
-                print(f"Error closing file on exit: {e}")
-
-def ensure_certificates():
-    # Jangan overwrite jika sudah ada
-    if os.path.exists(CERTFILE) and os.path.exists(KEYFILE):
-        return True
-    try:
-        print("Generating TLS certificate and key in home directory...")
-        subprocess.run([
-            "openssl", "req", "-new", "-x509", "-days", "3650", "-nodes",
-            "-out", CERTFILE, "-keyout", KEYFILE,
-            "-subj", "/CN=b-messenger-p2p"
-        ], check=True)
-        print(f"Certificate and key generated: {CERTFILE}, {KEYFILE}")
-    except Exception as e:
-        print(f"Failed to generate certificates: {e}")
-        return False
-    return True
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
