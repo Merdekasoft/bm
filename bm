@@ -224,17 +224,28 @@ class AdvancedNetworkManager(QObject):
                     if self.running: print(f"TLS server error: {e}")
     def send_tcp_message(self, peer_info, message_dict):
         context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
-        context.check_hostname = False; context.verify_mode = ssl.CERT_NONE
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
         try:
-            with socket.create_connection((peer_info['address'], peer_info['port']), timeout=10) as sock:
+            with socket.create_connection((peer_info['address'], peer_info['port']), timeout=5) as sock:
                 with context.wrap_socket(sock, server_hostname=peer_info['address']) as ssock:
                     message_bytes = json.dumps(message_dict).encode('utf-8')
+                    # Prefix each message with its length (4-byte integer)
                     ssock.sendall(struct.pack('>I', len(message_bytes)))
                     ssock.sendall(message_bytes)
+        except (ConnectionRefusedError, socket.timeout, OSError) as e:
+            print(f"Failed to send message to {peer_info['username']} at {peer_info['address']}:{peer_info['port']}: {e}")
+            # --- FIX: Instead of immediately removing the user, just log the error.
+            # The user will be removed organically when Zeroconf sends the remove_service signal
+            # if they truly went offline. This prevents removing users due to a single failed message
+            # which could be a temporary network hiccup.
+            #
+            # The following line is commented out to implement the fix:
+            # self.user_went_offline.emit(peer_info['name'])
+            pass # Silently ignore the error for a better user experience
         except Exception as e:
-            print(f"Failed to send message to {peer_info['username']}: {e}")
-            self.user_went_offline.emit(peer_info['name'])
-
+            print(f"An unexpected error occurred when sending a message to {peer_info['username']}: {e}")
+# ...existing code...
 # --- Main Application Window ---
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -643,7 +654,17 @@ class MainWindow(QMainWindow):
         else:
             container_layout.addWidget(bubble_widget); container_layout.addStretch()
         scroll_layout.addWidget(container_widget); scroll_layout.addStretch()
-        QTimer.singleShot(50, lambda: scroll_area.verticalScrollBar().setValue(scroll_area.verticalScrollBar().maximum()))
+        # Perbaikan: Hindari error jika scroll_area atau verticalScrollBar sudah dihapus
+        def safe_scroll():
+            try:
+                bar = getattr(scroll_area, "verticalScrollBar", None)
+                if callable(bar):
+                    vbar = bar()
+                    if vbar is not None:
+                        vbar.setValue(vbar.maximum())
+            except RuntimeError:
+                pass  # Widget sudah dihapus, abaikan
+        QTimer.singleShot(50, safe_scroll)
 
     def setup_network(self):
         self.network_thread = QThread(); self.network_manager = AdvancedNetworkManager()
@@ -657,10 +678,9 @@ class MainWindow(QMainWindow):
         service_name = peer_data['name']
         if service_name in self.chat_widgets: return
         username = peer_data['username']
-        # Gunakan os.uname().nodename untuk hostname lokal, address untuk peer lain
+        # Ganti os.uname() dengan socket.gethostname()
         try:
-            local_hostname = os.uname().nodename
-            # Jika username sama dengan user lokal, tampilkan hostname lokal
+            local_hostname = socket.gethostname()
             if username == getpass.getuser():
                 host = local_hostname
             else:
@@ -718,6 +738,7 @@ class MainWindow(QMainWindow):
         self.network_manager.send_tcp_message(data['peer_data'], msg_dict)
         self.add_message_to_history(widgets['scroll_area'], widgets['scroll_layout'], msg_dict, True)
         input_field.clear()
+        # Jangan panggil self.show_chat_list() atau ubah panel di sini!
 
     def handle_incoming_message(self, msg):
         msg_type = msg.get("type")
